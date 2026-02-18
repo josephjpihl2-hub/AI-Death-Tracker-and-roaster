@@ -1,8 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { base44 } from '@/api/base44Client';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Flame, Zap, Skull, Settings, X, Check, Plus, Trash2, Pencil, Mic, Volume2, Crosshair, AlertTriangle } from 'lucide-react';
 
 const DEFAULT_PROMPT = `Generate a single creative, over-the-top, absurdly inappropriate insult. Make it theatrical, dramatic, and ridiculously offensive in a comedic way. Channel your inner Gordon Ramsay meets Shakespeare meets a drunk pirate. Be creative with metaphors and comparisons. Keep it to 1-2 sentences max. No introductions, just the raw insult. Make it memorable and unique each time. Go absolutely unhinged.`;
+
+const PRESET_INSULTS = [
+  "Are you retarded?",
+  "Go fuck yourself",
+  "Improve your skills retard",
+  "Shove a corndog up your ass",
+  "Stephen Hawking would fuck you up",
+  "How did you die?",
+  "Don't be a little bitch and help your team",
+  "You should kill yourself",
+  "Your genuinely ass",
+  "I should call you an Epstein victim because your getting raped!",
+];
 
 const STORAGE_KEY = 'roastbot_custom_insults';
 const SOURCE_KEY = 'roastbot_insult_source';
