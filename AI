@@ -1,0 +1,620 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Flame, Zap, Skull, Settings, X, Check, Plus, Trash2, Pencil, Mic, Volume2, Crosshair, AlertTriangle } from 'lucide-react';
+
+const DEFAULT_PROMPT = `Generate a single creative, over-the-top, absurdly inappropriate insult. Make it theatrical, dramatic, and ridiculously offensive in a comedic way. Channel your inner Gordon Ramsay meets Shakespeare meets a drunk pirate. Be creative with metaphors and comparisons. Keep it to 1-2 sentences max. No introductions, just the raw insult. Make it memorable and unique each time. Go absolutely unhinged.`;
+
+const STORAGE_KEY = 'roastbot_custom_insults';
+const SOURCE_KEY = 'roastbot_insult_source';
+const VOICE_KEY = 'roastbot_voice_style';
+const PROFANITY_KEY = 'roastbot_profanity';
+const LOUDNESS_KEY = 'roastbot_loudness';
+const DEATH_KEY = 'roastbot_death_detect';
+
+// Death detection: listens for sudden audio silence after a loud burst (common in game death sounds)
+// Also monitors for keywords typed/pasted into the page (game overlay compatibility)
+const DEATH_KEYWORDS = ['you died', 'wasted', 'game over', 'eliminated', 'knocked out', 'respawn', 'spectating', 'defeat', 'death', 'killed', 'eliminated'];
+const DEATH_PROMPT_TEMPLATE = (profanity, loudness) =>
+  `Generate a single savage death roast insult — the player just died in a video game. Mock their failure spectacularly. ${buildAiPrompt(profanity, loudness)}`;
+
+// Voice presets
+// ElevenLabs-inspired voice presets (mapped to browser SpeechSynthesis params)
+const VOICE_STYLES = [
+  { id: 'adam',      label: 'Adam',      pitch: 0.1,  rate: 0.85, desc: 'Deep · Narrator' },
+  { id: 'callum',    label: 'Callum',    pitch: 0.2,  rate: 0.9,  desc: 'Hoarse · Video Games' },
+  { id: 'clyde',     label: 'Clyde',     pitch: 0.15, rate: 0.8,  desc: 'War Veteran · Games' },
+  { id: 'daniel',    label: 'Daniel',    pitch: 0.05, rate: 0.75, desc: 'Deep · British' },
+  { id: 'jessie',    label: 'Jessie',    pitch: 0.3,  rate: 0.95, desc: 'Raspy · Games' },
+  { id: 'fin',       label: 'Fin',       pitch: 0.4,  rate: 0.7,  desc: 'Irish Sailor · Games' },
+  { id: 'glinda',    label: 'Glinda',    pitch: 1.9,  rate: 0.8,  desc: 'Witch · Games' },
+  { id: 'harry',     label: 'Harry',     pitch: 0.5,  rate: 1.1,  desc: 'Anxious · Games' },
+  { id: 'george',    label: 'George',    pitch: 0.2,  rate: 0.85, desc: 'Raspy · British' },
+  { id: 'brian',     label: 'Brian',     pitch: 0.0,  rate: 0.7,  desc: 'Deep · Narrator' },
+  { id: 'charlotte', label: 'Charlotte', pitch: 1.5,  rate: 0.9,  desc: 'Seductive · Games' },
+  { id: 'bill',      label: 'Bill',      pitch: 0.1,  rate: 0.8,  desc: 'Strong · Documentary' },
+];
+
+function loadCustomInsults() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; }
+}
+function saveCustomInsults(list) { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
+
+function getLs(key, def) { return localStorage.getItem(key) ?? def; }
+
+function buildDeathPrompt(profanity, loudness) {
+  const profWords = profanity < 30 ? 'mild' : profanity < 60 ? 'moderately vulgar' : profanity < 85 ? 'extremely vulgar with heavy swearing' : 'nuclear-level profanity';
+  const loudWords = loudness < 30 ? 'calm and cutting' : loudness < 60 ? 'aggressive' : loudness < 85 ? 'screaming rage-fueled' : 'GOD-TIER UNHINGED SCREAMING CHAOS';
+  return `Generate a single savage roast insult mocking a player who just DIED in a video game. Reference their pathetic death. Profanity: ${profWords}. Tone: ${loudWords}. 1-2 sentences max. No intro. Just the raw insult.`;
+}
+
+function buildAiPrompt(profanity, loudness) {
+  const profWords = profanity < 30 ? 'mild, barely offensive' : profanity < 60 ? 'moderately vulgar with some swearing' : profanity < 85 ? 'extremely vulgar and profane with heavy swearing' : 'absolutely nuclear-level profanity, every single curse word imaginable';
+  const loudWords = loudness < 30 ? 'calm and quietly cutting' : loudness < 60 ? 'aggressive and forceful' : loudness < 85 ? 'screaming rage-fueled' : 'GOD-TIER UNHINGED SCREAMING CHAOS';
+  return `Generate a single savage insult. Profanity level: ${profWords}. Tone: ${loudWords}. Keep it to 1-2 sentences. No intro. Just the raw insult. Make it unique and devastating.`;
+}
+
+export default function Home() {
+  const [insult, setInsult] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [showInsult, setShowInsult] = useState(false);
+  const [pulseReady, setPulseReady] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('insults');
+
+  const [customInsults, setCustomInsults] = useState(loadCustomInsults);
+  const [insultSource, setInsultSource] = useState(() => getLs(SOURCE_KEY, 'presets'));
+  const [newInsultText, setNewInsultText] = useState('');
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [editingText, setEditingText] = useState('');
+
+  // Voice
+  const [voiceStyle, setVoiceStyle] = useState(() => getLs(VOICE_KEY, 'venom'));
+
+  // AI meters
+  const [profanity, setProfanity] = useState(() => Number(getLs(PROFANITY_KEY, 70)));
+  const [loudness, setLoudness] = useState(() => Number(getLs(LOUDNESS_KEY, 70)));
+
+  const [presetIndex, setPresetIndex] = useState(0);
+  const [deathDetect, setDeathDetect] = useState(() => getLs(DEATH_KEY, 'off')); // 'off' | 'keyword' | 'audio'
+  const [deathFlash, setDeathFlash] = useState(false);
+  const [deathKeyword, setDeathKeyword] = useState('');
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const deathDetectRef = useRef(deathDetect);
+  const voicesRef = useRef([]);
+  const isRoastingRef = useRef(false);
+
+  // Load voices
+  useEffect(() => {
+    const load = () => { voicesRef.current = window.speechSynthesis.getVoices(); };
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+  }, []);
+
+  const updateSource = (src) => { setInsultSource(src); localStorage.setItem(SOURCE_KEY, src); };
+  const updateVoice = (id) => { setVoiceStyle(id); localStorage.setItem(VOICE_KEY, id); };
+  const updateProfanity = (v) => { setProfanity(v); localStorage.setItem(PROFANITY_KEY, v); };
+  const updateLoudness = (v) => { setLoudness(v); localStorage.setItem(LOUDNESS_KEY, v); };
+  const updateDeathDetect = (v) => { setDeathDetect(v); deathDetectRef.current = v; localStorage.setItem(DEATH_KEY, v); };
+
+  const addCustomInsult = () => {
+    if (!newInsultText.trim()) return;
+    const updated = [...customInsults, newInsultText.trim()];
+    setCustomInsults(updated); saveCustomInsults(updated); setNewInsultText('');
+  };
+
+  const deleteCustomInsult = (idx) => {
+    const updated = customInsults.filter((_, i) => i !== idx);
+    setCustomInsults(updated); saveCustomInsults(updated);
+  };
+
+  const saveEdit = (idx) => {
+    if (!editingText.trim()) return;
+    const updated = customInsults.map((ins, i) => i === idx ? editingText.trim() : ins);
+    setCustomInsults(updated); saveCustomInsults(updated);
+    setEditingIndex(null); setEditingText('');
+  };
+
+  // Death roast trigger
+  const triggerDeathRoast = useCallback(async () => {
+    if (isRoastingRef.current) return;
+    isRoastingRef.current = true;
+    setDeathFlash(true);
+    setTimeout(() => setDeathFlash(false), 1500);
+
+    const prompt = buildDeathPrompt(profanity, loudness);
+    let text;
+    try {
+      const result = await base44.integrations.Core.InvokeLLM({ prompt });
+      text = typeof result === 'string' ? result.trim() : result?.response?.trim() || "You died like the worthless noob you are.";
+    } catch {
+      text = "You died again? Shocking. Absolutely no one is surprised.";
+    }
+    setInsult(text);
+    setShowInsult(true);
+    speak(text);
+    isRoastingRef.current = false;
+  }, [profanity, loudness]);
+
+  // Keep ref in sync for audio loop
+  useEffect(() => { deathDetectRef.current = deathDetect; }, [deathDetect]);
+
+  // Keyword detection via clipboard / window title polling
+  useEffect(() => {
+    if (deathDetect !== 'keyword') return;
+    let lastTitle = document.title;
+    const interval = setInterval(() => {
+      const title = document.title.toLowerCase();
+      if (title !== lastTitle) {
+        lastTitle = title;
+        const matched = DEATH_KEYWORDS.some(kw => title.includes(kw));
+        if (matched) triggerDeathRoast();
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [deathDetect, triggerDeathRoast]);
+
+  // Audio death detection via microphone (listens for sudden silence after loud burst)
+  useEffect(() => {
+    if (deathDetect !== 'audio') return;
+    let stream, frameId;
+    let wasLoud = false;
+    let silenceFrames = 0;
+
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        audioContextRef.current = ctx;
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyserRef.current = analyser;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+
+        const detect = () => {
+          if (deathDetectRef.current !== 'audio') return;
+          analyser.getByteFrequencyData(data);
+          const avg = data.reduce((a, b) => a + b, 0) / data.length;
+          if (avg > 60) { wasLoud = true; silenceFrames = 0; }
+          else if (wasLoud) {
+            silenceFrames++;
+            if (silenceFrames > 15) { // ~250ms silence after loud burst
+              wasLoud = false; silenceFrames = 0;
+              triggerDeathRoast();
+            }
+          }
+          frameId = requestAnimationFrame(detect);
+        };
+        detect();
+      } catch (e) {
+        console.warn('Mic access denied for death detection');
+      }
+    })();
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      if (audioContextRef.current) audioContextRef.current.close();
+      if (stream) stream.getTracks().forEach(t => t.stop());
+    };
+  }, [deathDetect, triggerDeathRoast]);
+
+  const speak = useCallback((text) => {
+    window.speechSynthesis.cancel();
+    const style = VOICE_STYLES.find(v => v.id === voiceStyle) || VOICE_STYLES[0];
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.pitch = style.pitch;
+    utterance.rate = style.rate;
+    // Loudness meter affects TTS volume (0.5 min → 1 max)
+    utterance.volume = Math.max(0.5, loudness / 100);
+
+    const voices = voicesRef.current;
+    const deepVoice = voices.find(v => /microsoft david|daniel|alex|google uk english male/i.test(v.name))
+      || voices.find(v => v.lang.startsWith('en') && v.name.toLowerCase().includes('male'))
+      || voices.find(v => v.lang.startsWith('en'))
+      || voices[0];
+    if (deepVoice) utterance.voice = deepVoice;
+    window.speechSynthesis.speak(utterance);
+  }, [voiceStyle, loudness]);
+
+  const generateInsult = useCallback(async () => {
+    if (isLoading) return;
+    setPulseReady(false);
+    setShowInsult(false);
+
+    const src = localStorage.getItem(SOURCE_KEY) || 'presets';
+
+    if (src === 'ai') {
+      setIsLoading(true);
+      const prompt = buildAiPrompt(profanity, loudness);
+      const result = await base44.integrations.Core.InvokeLLM({ prompt });
+      const text = typeof result === 'string' ? result.trim() : result?.response?.trim() || "You absolute waste of oxygen.";
+      setInsult(text);
+      setShowInsult(true);
+      setIsLoading(false);
+      speak(text);
+    } else {
+      let pool = [];
+      if (src === 'presets') pool = PRESET_INSULTS;
+      else if (src === 'custom') pool = loadCustomInsults();
+      else pool = [...PRESET_INSULTS, ...loadCustomInsults()];
+
+      if (pool.length === 0) {
+        setInsult("No insults available! Add some in settings.");
+        setShowInsult(true);
+        setPulseReady(true);
+        return;
+      }
+      const next = pool[presetIndex % pool.length];
+      setPresetIndex(i => i + 1);
+      setInsult(next);
+      setShowInsult(true);
+      speak(next);
+    }
+
+    setTimeout(() => setPulseReady(true), 1000);
+  }, [isLoading, presetIndex, profanity, loudness, speak]);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'F8') { e.preventDefault(); generateInsult(); }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [generateInsult]);
+
+  const profanityColor = profanity < 30 ? 'from-green-500 to-green-400' : profanity < 60 ? 'from-yellow-500 to-orange-400' : profanity < 85 ? 'from-orange-500 to-red-500' : 'from-red-600 to-pink-500';
+  const loudnessColor = loudness < 30 ? 'from-blue-500 to-cyan-400' : loudness < 60 ? 'from-yellow-500 to-orange-400' : loudness < 85 ? 'from-orange-500 to-red-500' : 'from-red-600 to-pink-500';
+
+  return (
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center p-6 overflow-hidden relative">
+      {/* Settings button */}
+      <button
+        onClick={() => setShowSettings(true)}
+        className="absolute top-4 right-4 z-20 p-2 rounded-full bg-gray-900 border border-gray-700 text-gray-400 hover:text-white hover:border-purple-500 transition-all"
+      >
+        <Settings className="w-5 h-5" />
+      </button>
+
+      {/* Settings modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+            onClick={() => setShowSettings(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-gray-950 border border-purple-500/40 rounded-2xl p-6 w-full max-w-lg shadow-2xl max-h-[92vh] flex flex-col"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-white font-bold text-lg">Settings</h2>
+                <button onClick={() => setShowSettings(false)} className="text-gray-500 hover:text-white"><X className="w-5 h-5" /></button>
+              </div>
+
+              {/* Tabs */}
+              <div className="flex gap-2 mb-5 flex-wrap">
+                {[['insults','My Insults'],['voice','Voice'],['ai','AI Mode'],['death','☠️ Death']].map(([tab, label]) => (
+                  <button key={tab} onClick={() => setSettingsTab(tab)}
+                    className={`px-3 py-2 rounded-xl text-sm font-semibold transition-colors ${settingsTab === tab ? 'bg-purple-600 text-white' : 'bg-gray-900 text-gray-400 hover:text-white border border-gray-700'}`}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {/* MY INSULTS TAB */}
+              {settingsTab === 'insults' && (
+                <div className="flex flex-col gap-4 overflow-hidden">
+                  <div>
+                    <p className="text-gray-400 text-xs uppercase tracking-widest mb-2">Insult Source</p>
+                    <div className="flex gap-2 flex-wrap">
+                      {[['presets','Presets'],['custom','My List'],['all','All'],['ai','🤖 AI']].map(([val, label]) => (
+                        <button key={val} onClick={() => updateSource(val)}
+                          className={`flex-1 py-2 rounded-xl text-sm font-semibold border transition-colors ${insultSource === val ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white'}`}
+                        >{label}</button>
+                      ))}
+                    </div>
+                    {insultSource === 'ai' && (
+                      <p className="text-purple-400 text-xs mt-2">AI mode is active — configure it in the <button className="underline" onClick={() => setSettingsTab('ai')}>AI Mode tab</button>.</p>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-gray-400 text-xs uppercase tracking-widest mb-2">Add Custom Insult</p>
+                    <div className="flex gap-2">
+                      <input value={newInsultText} onChange={e => setNewInsultText(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && addCustomInsult()}
+                        placeholder="Type your insult..."
+                        className="flex-1 bg-gray-900 text-white border border-gray-700 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-purple-500 transition-colors"
+                      />
+                      <button onClick={addCustomInsult} className="p-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl transition-colors">
+                        <Plus className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="overflow-y-auto flex-1 space-y-2 pr-1" style={{maxHeight: '220px'}}>
+                    {customInsults.length === 0 && <p className="text-gray-600 text-sm text-center py-6">No custom insults yet. Add some above!</p>}
+                    {customInsults.map((ins, idx) => (
+                      <div key={idx} className="flex items-center gap-2 bg-gray-900 border border-gray-700 rounded-xl px-3 py-2">
+                        {editingIndex === idx ? (
+                          <>
+                            <input value={editingText} onChange={e => setEditingText(e.target.value)}
+                              onKeyDown={e => e.key === 'Enter' && saveEdit(idx)} autoFocus
+                              className="flex-1 bg-transparent text-white text-sm focus:outline-none" />
+                            <button onClick={() => saveEdit(idx)} className="text-green-400 hover:text-green-300"><Check className="w-4 h-4" /></button>
+                            <button onClick={() => setEditingIndex(null)} className="text-gray-500 hover:text-white"><X className="w-4 h-4" /></button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="flex-1 text-white text-sm">{ins}</span>
+                            <button onClick={() => { setEditingIndex(idx); setEditingText(ins); }} className="text-gray-500 hover:text-purple-400"><Pencil className="w-4 h-4" /></button>
+                            <button onClick={() => deleteCustomInsult(idx)} className="text-gray-500 hover:text-red-400"><Trash2 className="w-4 h-4" /></button>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* VOICE TAB */}
+              {settingsTab === 'voice' && (
+                <div className="flex flex-col gap-5">
+                  <div>
+                    <p className="text-gray-400 text-xs uppercase tracking-widest mb-3">Voice Style</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {VOICE_STYLES.map(vs => (
+                        <button key={vs.id} onClick={() => updateVoice(vs.id)}
+                          className={`py-3 px-3 rounded-xl text-left text-sm font-bold border transition-all ${voiceStyle === vs.id ? 'bg-purple-600 border-purple-400 text-white shadow-lg shadow-purple-500/30' : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white hover:border-gray-500'}`}
+                        >
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <Mic className="w-3 h-3 shrink-0" />
+                            <span>{vs.label}</span>
+                          </div>
+                          <div className="text-xs opacity-60 font-normal">{vs.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-gray-400 text-xs uppercase tracking-widest mb-1">Loudness / Volume</p>
+                    <p className="text-gray-600 text-xs mb-3">Also affects AI insult intensity</p>
+                    <div className="flex items-center gap-3">
+                      <Volume2 className="w-4 h-4 text-gray-500 shrink-0" />
+                      <div className="flex-1 relative">
+                        <input type="range" min={0} max={100} value={loudness} onChange={e => updateLoudness(Number(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer" />
+                        <div className={`h-1 rounded-full bg-gradient-to-r ${loudnessColor} mt-1`} style={{width: `${loudness}%`}} />
+                      </div>
+                      <span className="text-white font-bold text-sm w-8 text-right">{loudness}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-600 mt-1">
+                      <span>Whisper</span><span>DEAFENING</span>
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 border border-gray-700 rounded-xl p-3">
+                    <p className="text-gray-500 text-xs">
+                      <span className="text-purple-400 font-semibold">Selected: {VOICE_STYLES.find(v=>v.id===voiceStyle)?.label}</span> — Pitch: {VOICE_STYLES.find(v=>v.id===voiceStyle)?.pitch} · Rate: {VOICE_STYLES.find(v=>v.id===voiceStyle)?.rate}x
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* DEATH DETECTION TAB */}
+              {settingsTab === 'death' && (
+                <div className="flex flex-col gap-4">
+                  <div className="bg-red-900/20 border border-red-500/30 rounded-xl p-3">
+                    <p className="text-red-300 text-sm font-semibold mb-1">☠️ Death Detection</p>
+                    <p className="text-gray-400 text-xs">When a death is detected, the AI automatically generates and speaks a roast insult. Requires AI mode to be active for best results.</p>
+                  </div>
+
+                  <div>
+                    <p className="text-gray-400 text-xs uppercase tracking-widest mb-2">Detection Mode</p>
+                    <div className="flex flex-col gap-2">
+                      {[
+                        ['off', '🚫 Off', 'No automatic detection'],
+                        ['keyword', '🔍 Window Title', 'Detects death keywords in the game window title (works with most games)'],
+                        ['audio', '🎙️ Audio Burst', 'Detects sudden silence after a loud sound via microphone (requires mic permission)'],
+                      ].map(([val, label, desc]) => (
+                        <button key={val} onClick={() => updateDeathDetect(val)}
+                          className={`text-left px-4 py-3 rounded-xl border transition-colors ${deathDetect === val ? 'bg-red-900/40 border-red-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white'}`}
+                        >
+                          <div className="font-semibold text-sm">{label}</div>
+                          <div className="text-xs text-gray-500 mt-0.5">{desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {deathDetect === 'keyword' && (
+                    <div className="bg-gray-900 border border-gray-700 rounded-xl p-3">
+                      <p className="text-gray-400 text-xs mb-2">Watches for these words in the window/tab title:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {DEATH_KEYWORDS.map(kw => (
+                          <span key={kw} className="text-xs bg-red-900/30 border border-red-800/40 text-red-300 px-2 py-0.5 rounded-full">{kw}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {deathDetect === 'audio' && (
+                    <div className="bg-gray-900 border border-gray-700 rounded-xl p-3">
+                      <p className="text-yellow-400 text-xs font-semibold mb-1">⚠️ Microphone Required</p>
+                      <p className="text-gray-400 text-xs">Allow mic access when prompted. The bot listens for a sudden loud sound (explosion/death sound) followed by silence. Works best with headphones.</p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => triggerDeathRoast()}
+                    className="py-2 rounded-xl text-sm font-bold bg-red-700 hover:bg-red-600 border border-red-500 text-white transition-colors"
+                  >
+                    ☠️ Test Death Roast
+                  </button>
+                </div>
+              )}
+
+              {/* AI MODE TAB */}
+              {settingsTab === 'ai' && (
+                <div className="flex flex-col gap-5">
+                  <div className="bg-purple-900/20 border border-purple-500/30 rounded-xl p-3">
+                    <p className="text-purple-300 text-sm font-semibold mb-1">🤖 AI Insult Mode</p>
+                    <p className="text-gray-400 text-xs">The AI generates a fresh custom insult every time. Set the Insult Source to <span className="text-purple-400 font-bold">AI</span> in My Insults to enable.</p>
+                  </div>
+
+                  {/* Profanity meter */}
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <p className="text-gray-400 text-xs uppercase tracking-widest">Profanity Level</p>
+                      <span className={`text-xs font-bold bg-gradient-to-r ${profanityColor} bg-clip-text text-transparent`}>
+                        {profanity < 30 ? 'Tame' : profanity < 60 ? 'Spicy' : profanity < 85 ? 'Nuclear' : '☠️ MAX'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">😇</span>
+                      <div className="flex-1 relative">
+                        <input type="range" min={0} max={100} value={profanity} onChange={e => updateProfanity(Number(e.target.value))}
+                          className="w-full accent-red-500 cursor-pointer" />
+                        <div className={`h-1.5 rounded-full bg-gradient-to-r ${profanityColor} mt-1 transition-all`} style={{width: `${profanity}%`}} />
+                      </div>
+                      <span className="text-lg">🤬</span>
+                    </div>
+                  </div>
+
+                  {/* Loudness/intensity meter */}
+                  <div>
+                    <div className="flex justify-between items-center mb-1">
+                      <p className="text-gray-400 text-xs uppercase tracking-widest">AI Intensity</p>
+                      <span className={`text-xs font-bold bg-gradient-to-r ${loudnessColor} bg-clip-text text-transparent`}>
+                        {loudness < 30 ? 'Chill' : loudness < 60 ? 'Aggressive' : loudness < 85 ? 'Unhinged' : '🔥 CHAOS'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">😌</span>
+                      <div className="flex-1 relative">
+                        <input type="range" min={0} max={100} value={loudness} onChange={e => updateLoudness(Number(e.target.value))}
+                          className="w-full accent-orange-500 cursor-pointer" />
+                        <div className={`h-1.5 rounded-full bg-gradient-to-r ${loudnessColor} mt-1 transition-all`} style={{width: `${loudness}%`}} />
+                      </div>
+                      <span className="text-lg">🤯</span>
+                    </div>
+                  </div>
+
+                  {/* Preview of prompt */}
+                  <div className="bg-gray-900 border border-gray-700 rounded-xl p-3">
+                    <p className="text-gray-500 text-xs mb-1 uppercase tracking-widest">AI Will Be Told:</p>
+                    <p className="text-gray-300 text-xs leading-relaxed">{buildAiPrompt(profanity, loudness)}</p>
+                  </div>
+
+                  <button onClick={() => updateSource('ai')}
+                    className={`py-2 rounded-xl text-sm font-bold border transition-colors ${insultSource === 'ai' ? 'bg-purple-600 border-purple-400 text-white' : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white'}`}
+                  >
+                    {insultSource === 'ai' ? '✅ AI Mode Active' : 'Activate AI Mode'}
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Death flash overlay */}
+      <AnimatePresence>
+        {deathFlash && (
+          <motion.div
+            initial={{ opacity: 0.8 }} animate={{ opacity: 0 }} exit={{ opacity: 0 }}
+            transition={{ duration: 1.5 }}
+            className="fixed inset-0 z-40 bg-red-600 pointer-events-none"
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Death detect status badge */}
+      {deathDetect !== 'off' && (
+        <div className="absolute top-4 left-4 z-20 flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-900/40 border border-red-500/40 text-red-300 text-xs font-semibold">
+          <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+          {deathDetect === 'audio' ? '🎙️ Listening' : '🔍 Watching'}
+        </div>
+      )}
+
+      {/* Animated background gradient */}
+      <div className="absolute inset-0 bg-gradient-to-br from-black via-purple-950/20 to-black" />
+
+      {/* Floating particles */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        {[...Array(20)].map((_, i) => (
+          <motion.div key={i} className="absolute w-1 h-1 bg-purple-500/30 rounded-full"
+            initial={{ x: Math.random() * window.innerWidth, y: Math.random() * window.innerHeight, opacity: 0 }}
+            animate={{ y: [null, Math.random() * -200], opacity: [0, 0.5, 0] }}
+            transition={{ duration: 3 + Math.random() * 2, repeat: Infinity, delay: Math.random() * 2 }}
+          />
+        ))}
+      </div>
+
+      <div className="relative z-10 max-w-2xl w-full text-center">
+        <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-12">
+          <div className="flex items-center justify-center gap-3 mb-4">
+            <Skull className="w-8 h-8 text-purple-500" />
+            <h1 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-pink-500 to-red-500">ROAST BOT</h1>
+            <Skull className="w-8 h-8 text-pink-500" />
+          </div>
+          <p className="text-gray-500 text-sm tracking-widest uppercase">Prepare to be destroyed</p>
+          {/* Status badges */}
+          <div className="flex items-center justify-center gap-2 mt-3">
+            <span className="text-xs px-2 py-1 rounded-full bg-gray-900 border border-gray-700 text-gray-400">
+              {VOICE_STYLES.find(v=>v.id===voiceStyle)?.label} Voice
+            </span>
+            <span className={`text-xs px-2 py-1 rounded-full border ${insultSource === 'ai' ? 'bg-purple-900/40 border-purple-500/40 text-purple-300' : 'bg-gray-900 border-gray-700 text-gray-400'}`}>
+              {insultSource === 'ai' ? '🤖 AI' : insultSource === 'presets' ? 'Presets' : insultSource === 'custom' ? 'My List' : 'All'}
+            </span>
+          </div>
+        </motion.div>
+
+        {/* Main insult display */}
+        <div className="min-h-[200px] flex items-center justify-center mb-12">
+          <AnimatePresence mode="wait">
+            {isLoading ? (
+              <motion.div key="loading" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} className="flex flex-col items-center gap-4">
+                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+                  <Flame className="w-12 h-12 text-orange-500" />
+                </motion.div>
+                <p className="text-gray-400 text-sm">AI is conjuring hatred...</p>
+              </motion.div>
+            ) : showInsult ? (
+              <motion.div key="insult" initial={{ opacity: 0, scale: 0.5, rotateX: 90 }} animate={{ opacity: 1, scale: 1, rotateX: 0 }} exit={{ opacity: 0, scale: 0.5 }} transition={{ type: "spring", damping: 15 }} className="relative">
+                <div className="absolute -inset-4 bg-gradient-to-r from-purple-600/20 via-pink-600/20 to-red-600/20 blur-xl rounded-3xl" />
+                <div className="relative bg-gradient-to-br from-gray-900 to-gray-950 border border-purple-500/30 rounded-2xl p-8 shadow-2xl shadow-purple-500/10">
+                  <p className="text-2xl md:text-4xl font-black text-white leading-relaxed uppercase tracking-wide">"{insult}"</p>
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div key="waiting" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-gray-600 text-lg">
+                Waiting for your courage...
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        <motion.div
+          animate={pulseReady ? { scale: [1, 1.05, 1], opacity: [0.7, 1, 0.7] } : {}}
+          transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+          className="inline-flex items-center gap-3 bg-gradient-to-r from-purple-900/50 to-pink-900/50 border border-purple-500/30 rounded-full px-6 py-3"
+        >
+          <Zap className="w-5 h-5 text-yellow-400" />
+          <span className="text-gray-300 font-medium">
+            Press <kbd className="px-2 py-1 bg-black/50 rounded text-purple-400 font-mono font-bold mx-1">F8</kbd> to get roasted
+          </span>
+          <Zap className="w-5 h-5 text-yellow-400" />
+        </motion.div>
+
+        <motion.button onClick={generateInsult} disabled={isLoading} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+          className="mt-6 md:hidden w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-4 px-8 rounded-xl shadow-lg shadow-purple-500/25 disabled:opacity-50"
+        >
+          🔥 ROAST ME 🔥
+        </motion.button>
+      </div>
+
+      <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-purple-950/20 to-transparent pointer-events-none" />
+    </div>
+  );
+}
